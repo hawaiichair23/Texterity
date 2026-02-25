@@ -16,24 +16,27 @@
             
             try {
                 const files = fs.readdirSync(fontsDir);
-                const ttfFiles = files.filter(f => f.endsWith('.ttf'));
+                const ttfFiles = files.filter(f => f.endsWith('.ttf') || f.endsWith('.otf'));
                 
                 const fontNames = [];
                 
                 ttfFiles.forEach(file => {
-                    const fontName = file.replace('.ttf', '').replace(/-/g, ' ');
+                    const isOtf = file.endsWith('.otf');
+                    const fontName = file.replace(/\.(ttf|otf)$/, '').replace(/-/g, ' ');
                     fontNames.push(fontName);
                     const fontPath = path.join(fontsDir, file);
                     
                     // Read font file as base64
                     const fontData = fs.readFileSync(fontPath);
                     const base64Font = fontData.toString('base64');
+                    const fontFormat = isOtf ? 'opentype' : 'truetype';
+                    const mimeType = isOtf ? 'font/otf' : 'font/truetype';
                     
                     const style = document.createElement('style');
                     style.textContent = `
                         @font-face {
                             font-family: "${fontName}";
-                            src: url(data:font/truetype;charset=utf-8;base64,${base64Font}) format("truetype");
+                            src: url(data:${mimeType};charset=utf-8;base64,${base64Font}) format("${fontFormat}");
                         }
                     `;
                     document.head.appendChild(style);

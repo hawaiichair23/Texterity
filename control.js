@@ -63,6 +63,7 @@ let fontUsageCount = {}; // Track font usage for "recent fonts"
 
 // Google Fonts list - populated dynamically from fonts folder
 const GOOGLE_FONTS = [];
+const FONT_FILE_MAP = {}; // Maps font family name -> actual filename (without extension)
 
 // System fonts (pre-installed)
 const SYSTEM_FONTS = [
@@ -101,7 +102,7 @@ function loadLocalFontsFromDirectory() {
 
     try {
         const files = fs.readdirSync(fontsDir);
-        const ttfFiles = files.filter(f => f.endsWith('.ttf'));
+        const ttfFiles = files.filter(f => f.endsWith('.ttf') || f.endsWith('.otf'));
 
         console.log(`[Fonts] Found ${ttfFiles.length} TTF fonts in fonts/ directory`);
 
@@ -130,6 +131,8 @@ function loadLocalFontsFromDirectory() {
                     if (!GOOGLE_FONTS.includes(cleanFontName)) {
                         GOOGLE_FONTS.push(cleanFontName);
                     }
+                    // Map family name to actual filename so loadGoogleFont can find it
+                    FONT_FILE_MAP[cleanFontName] = file.replace(/\.(ttf|otf)$/, '');
 
                     // Load font with @font-face using the CLEAN name
                     const style = document.createElement('style');
@@ -153,13 +156,14 @@ function loadLocalFontsFromDirectory() {
                 } catch (fontError) {
                     console.error(`[Fonts] Failed to parse ${file}:`, fontError.message);
                     // Fallback to filename
-                    let fontName = file.replace('.ttf', '').replace(/-/g, ' ');
+                    let fontName = file.replace(/\.(ttf|otf)$/, '').replace(/-/g, ' ');
                     const cleanFontName = stripWeightFromFontName(fontName);
                     console.warn(`[Fonts] Using fallback name for ${file}: "${cleanFontName}"`);
 
                     if (!GOOGLE_FONTS.includes(cleanFontName)) {
                         GOOGLE_FONTS.push(cleanFontName);
                     }
+                    FONT_FILE_MAP[cleanFontName] = file.replace(/\.(ttf|otf)$/, '');
 
                     const style = document.createElement('style');
                     style.textContent = `
@@ -179,13 +183,14 @@ function loadLocalFontsFromDirectory() {
                 }
             } else {
                 // opentype.js not available - use filename (old behavior)
-                let fontName = file.replace('.ttf', '').replace(/-/g, ' ');
+                let fontName = file.replace(/\.(ttf|otf)$/, '').replace(/-/g, ' ');
                 const cleanFontName = stripWeightFromFontName(fontName);
                 console.log(`[Fonts] Loading without parsing: "${cleanFontName}" (from ${file})`);
 
                 if (!GOOGLE_FONTS.includes(cleanFontName)) {
                     GOOGLE_FONTS.push(cleanFontName);
                 }
+                FONT_FILE_MAP[cleanFontName] = file.replace(/\.(ttf|otf)$/, '');
 
                 const style = document.createElement('style');
                 style.textContent = `
@@ -649,17 +654,20 @@ ipcRenderer.on('overlay-visibility-changed', (event, isHidden) => {
 function createScriptAPI(scriptId) {
     const api = {        // Create a new text object
         createTextObject: function(config) {
-            // First, check if this script already created a text object
-            let existingObj = textObjects.find(obj => obj.createdByScript === scriptId);
-            
-            // If not found by script, try to find by name
-            if (!existingObj && config.name) {
+            // First, try to find by name (most specific)
+            let existingObj = null;
+            if (config.name) {
                 existingObj = textObjects.find(obj => obj.name === config.name);
             }
             
             // If not found by name, try to find by ID
             if (!existingObj && config.id !== undefined) {
                 existingObj = textObjects.find(obj => obj.id === config.id);
+            }
+
+            // Fall back to script ownership only if no name given
+            if (!existingObj && !config.name) {
+                existingObj = textObjects.find(obj => obj.createdByScript === scriptId);
             }
             
             if (existingObj) {
@@ -707,14 +715,15 @@ function createScriptAPI(scriptId) {
                 positionY: config.y !== undefined ? config.y : null,
                 fontSize: config.fontSize || defaultFontSize,
                 fontFamily: config.fontFamily || 'Instrument Serif',
-                color: config.color || 0xFFFFFF,
+                color: config.color !== undefined ? config.color : 0xFFFFFF,
                 loopAnimation: false, // Scripts control animation, disable preset looping
                 outlineEnabled: config.outlineEnabled !== undefined ? config.outlineEnabled : true,
                 outlineColor: config.outlineColor || 0x000000,
                 outlineWidth: config.outlineWidth || 4,
-                animationPreset: null, // No animation preset for script-created objects
-                createdByScript: scriptId, // Track which script created this
-                collapsed: false
+                animationPreset: null,
+                createdByScript: scriptId,
+                collapsed: false,
+                charSizes: config.charSizes || null
             };
             
             textObjects.push(textObject);
@@ -986,6 +995,116 @@ function createScriptAPI(scriptId) {
         }, 50);        return intervalId;
     };
     
+    api.spiralInEffect = function(id, radius = 40, speed = 0.06, stagger = 0.6, linger = 0) {
+        const textObject = textObjects.find(obj => obj.id === id);
+        if (!textObject) {
+            logScriptMessage(scriptId, `Text object ${id} not found`, 'error');
+            return null;
+        }
+
+        const textLength = textObject.text.length;
+        let time = 0;
+        let lingerTimer = 0;
+        // A full cycle is when the last char completes its spiral: time reaches lastCharPeak
+        const cycleLength = Math.PI * 2 + stagger * textLength;
+
+        const intervalId = api.setInterval(() => {
+            // If lingering, count down and don't advance time
+            if (lingerTimer > 0) {
+                lingerTimer -= 16;
+                return;
+            }
+
+            // Check if we just completed a cycle - if so, start linger
+            if (linger > 0 && time > 0 && (time % cycleLength) < speed) {
+                lingerTimer = linger;
+            }
+
+            const offsets = [];
+
+            for (let i = 0; i < textLength; i++) {
+                // Each char is offset in phase - wave travels through the word
+                const phase = time - i * stagger;
+                const r = radius * Math.pow(Math.sin(phase * 0.5), 2);
+                const angle = phase * 3;
+
+                offsets.push({
+                    x: Math.cos(angle) * r,
+                    y: Math.sin(angle) * r
+                });
+            }
+
+            api.setCharacterOffsets(id, offsets);
+            time += speed;
+        }, 16);
+
+        return intervalId;
+    };
+
+
+    // Sets the scale of individual characters
+    // charIndex: 0-based index of the character, scale: multiplier (1.0 = normal, 1.2 = 20% bigger)
+    // Call with an array of scales, use null to leave a character unchanged
+    // e.g. setCharacterSize(textId, [1.2, null, null, null]) - makes first char 20% bigger
+    api.setCharacterSize = function(id, sizes) {
+        const textObject = textObjects.find(obj => obj.id === id);
+        if (!textObject) {
+            logScriptMessage(scriptId, `Text object ${id} not found`, 'error');
+            return;
+        }
+        ipcRenderer.send('set-character-size', { id, sizes });
+    };
+
+    // Sets a static per-character random Y nudge (±intensity px) to make text feel organic
+    // Call once before your animation - offsets are baked in and stay consistent
+    api.jitterBaseline = function(id, intensity = 2) {
+        const textObject = textObjects.find(obj => obj.id === id);
+        if (!textObject) {
+            logScriptMessage(scriptId, `Text object ${id} not found`, 'error');
+            return null;
+        }
+
+        const textLength = textObject.text.length;
+        const offsets = [];
+        for (let i = 0; i < textLength; i++) {
+            offsets.push({
+                x: 0,
+                y: (Math.random() * 2 - 1) * intensity
+            });
+        }
+
+        ipcRenderer.send('set-character-jitter', { id, offsets });
+    };
+    // angle in radians: Math.PI/4 = bottom-right, Math.PI/2 = bottom, etc.
+    api.extrudeEffect = function(id, distance = 6, angle = Math.PI / 4, color = 0x000000, blur = 0) {
+        const textObject = textObjects.find(obj => obj.id === id);
+        if (!textObject) {
+            logScriptMessage(scriptId, `Text object ${id} not found`, 'error');
+            return null;
+        }
+
+        // Store shadow settings on the text object
+        textObject.dropShadow = true;
+        textObject.dropShadowColor = color;
+        textObject.dropShadowAlpha = 1;
+        textObject.dropShadowAngle = angle;
+        textObject.dropShadowBlur = blur;
+        textObject.dropShadowDistance = distance;
+
+        ipcRenderer.send('update-text-object-settings', {
+            id,
+            dropShadow: true,
+            dropShadowColor: color,
+            dropShadowAlpha: 1,
+            dropShadowAngle: angle,
+            dropShadowBlur: blur,
+            dropShadowDistance: distance,
+            silent: false // re-render so new style takes effect
+        });
+
+        return true;
+    };
+
     // Fade out text (smooth opacity transition)
     api.fadeOut = function(id, duration = 1000) {
         const textObject = textObjects.find(obj => obj.id === id);
@@ -1150,14 +1269,105 @@ function createScriptAPI(scriptId) {
             y: x * sin + y * cos,
             z: z
         };
-    };
-    
-    api.project3D = function(x, y, z, distance = 500) {
+    };    api.project3D = function(x, y, z, distance = 500) {
         const scale = distance / (distance + z);
         return {
             x: x * scale + 640, // Center at 640 (half of 1280)
             y: y * scale + 360  // Center at 360 (half of 720)
         };
+    };    
+    
+    // Add lighting to triangles based on 3D surface normals with backface culling and z-sorting
+    // vertices3D: array of {x, y, z} 3D positions AFTER rotation
+    // faces: array of [v1, v2, v3] index triplets
+    // lightDir: direction light is coming from
+    api.calculateFaceLighting = function(vertices3D, faces, lightDir = {x: 1, y: -1, z: 1}) {
+        // Normalize light direction
+        const lightLen = Math.sqrt(lightDir.x * lightDir.x + lightDir.y * lightDir.y + lightDir.z * lightDir.z);
+        const lightNorm = {
+            x: lightDir.x / lightLen,
+            y: lightDir.y / lightLen,
+            z: lightDir.z / lightLen
+        };
+        
+        // Camera is at origin looking down -Z axis
+        const cameraPos = { x: 0, y: 0, z: 0 };
+        
+        // Calculate brightness for each face WITH backface culling and z-depth
+        const faceData = [];
+        
+        for (let i = 0; i < faces.length; i++) {
+            const face = faces[i];
+            const v1 = vertices3D[face[0]];
+            const v2 = vertices3D[face[1]];
+            const v3 = vertices3D[face[2]];
+            
+            // Calculate two edges of the triangle
+            const edge1 = {
+                x: v2.x - v1.x,
+                y: v2.y - v1.y,
+                z: v2.z - v1.z
+            };
+            
+            const edge2 = {
+                x: v3.x - v1.x,
+                y: v3.y - v1.y,
+                z: v3.z - v1.z
+            };
+            
+            // Calculate normal (cross product)
+            const normal = {
+                x: edge1.y * edge2.z - edge1.z * edge2.y,
+                y: edge1.z * edge2.x - edge1.x * edge2.z,
+                z: edge1.x * edge2.y - edge1.y * edge2.x
+            };
+            
+            // Normalize the normal
+            const normalLen = Math.sqrt(normal.x * normal.x + normal.y * normal.y + normal.z * normal.z);
+            if (normalLen > 0) {
+                normal.x /= normalLen;
+                normal.y /= normalLen;
+                normal.z /= normalLen;
+            }
+            
+            // BACKFACE CULLING: Calculate camera vector (from camera to triangle)
+            const camVec = {
+                x: v1.x - cameraPos.x,
+                y: v1.y - cameraPos.y,
+                z: v1.z - cameraPos.z
+            };
+            
+            // Dot product - if positive, triangle faces away from camera, cull it
+            const facing = normal.x * camVec.x + normal.y * camVec.y + normal.z * camVec.z;
+            
+            if (facing >= 0) {
+                // Backface - skip it
+                continue;
+            }
+            
+            // Calculate lighting (dot product with light direction)
+            let brightness = normal.x * lightNorm.x + normal.y * lightNorm.y + normal.z * lightNorm.z;
+            
+            // Clamp to 0-1 and add ambient light
+            brightness = Math.max(0, brightness);
+            brightness = 0.3 + brightness * 0.7; // 30% ambient + 70% directional
+            
+            // Calculate average Z depth for sorting (painter's algorithm)
+            const avgZ = (v1.z + v2.z + v3.z) / 3;
+            
+            faceData.push({
+                faceIndex: i,
+                brightness: brightness,
+                avgZ: avgZ
+            });
+        }        // Z-SORT: Sort by average Z (farthest first)
+        faceData.sort((a, b) => b.avgZ - a.avgZ);
+        
+        // Return array of brightness values in sorted order with original face indices
+        return faceData.map(data => ({
+            faceIndex: data.faceIndex,
+            brightness: data.brightness
+        }));
     };
 
     return api;
@@ -1199,6 +1409,10 @@ function runScript(id) {
             'randomColor',
             'setCharacterOffsets',
             'setCharacterColors',
+            'setCharacterSize',
+            'extrudeEffect',
+            'jitterBaseline',
+            'spiralInEffect',
             'waveEffect',
             'bounceEffect',
             'shakeEffect',
@@ -1206,11 +1420,11 @@ function runScript(id) {
             'clearTriangles',
             'drawTriangles',
             'startAnimation',
-            'stopAnimation',
-            'rotateX',
+            'stopAnimation',            'rotateX',
             'rotateY',
             'rotateZ',
             'project3D',
+            'calculateFaceLighting',
             'setTimeout',
             'setInterval',
             'console',
@@ -1223,6 +1437,10 @@ function runScript(id) {
             api.randomColor,
             api.setCharacterOffsets,
             api.setCharacterColors,
+            api.setCharacterSize,
+            api.extrudeEffect,
+            api.jitterBaseline,
+            api.spiralInEffect,
             api.waveEffect,
             api.bounceEffect,
             api.shakeEffect,
@@ -1230,11 +1448,11 @@ function runScript(id) {
             api.clearTriangles,
             api.drawTriangles,
             api.startAnimation,
-            api.stopAnimation,
-            api.rotateX,
+            api.stopAnimation,            api.rotateX,
             api.rotateY,
             api.rotateZ,
             api.project3D,
+            api.calculateFaceLighting,
             api.setTimeout,
             api.setInterval,
             api.console
@@ -2344,8 +2562,8 @@ async function loadGoogleFont(fontFamily) {
     if (loadedGoogleFonts.has(fontFamily)) return;
     
     try {
-        // Load from local fonts folder - try multiple formats
-        const fontFileName = fontFamily.replace(/ /g, '-');
+        // Use the actual filename from the map, fall back to derived name
+        const fontFileName = FONT_FILE_MAP[fontFamily] || fontFamily.replace(/ /g, '-');
         
         const style = document.createElement('style');
         style.textContent = `
@@ -2365,8 +2583,6 @@ async function loadGoogleFont(fontFamily) {
         
         loadedGoogleFonts.add(fontFamily);
         
-        // Don't send to overlay - fonts already loaded at startup via IPC (lines 152-206)
-        // ipcRenderer.send('load-google-font', { fontFamily, fontFileName });
     } catch (error) {
         console.error(`Failed to load font ${fontFamily}:`, error);
     }
@@ -2802,23 +3018,39 @@ function generateOBJCode(vertices, faces, modelName) {
         code += '\n';
     }
     code += '];\n\n';    // Add example animation code
-    code += `// Simple horizontal rotation\n`;
+    code += `// Simple horizontal rotation with lighting, backface culling, and z-sorting\n`;
     code += `let angle = 0;\n\n`;
     code += `startAnimation(function() {\n`;
-    code += `    const projected = ${modelName}Vertices.map(v => {\n`;
-    code += `        let rotated = rotateY(v[0], v[1], v[2], angle);\n`;
-    code += `        return project3D(rotated.x, rotated.y, rotated.z);\n`;
+    code += `    // Rotate vertices in 3D\n`;
+    code += `    const rotated3D = ${modelName}Vertices.map(v => {\n`;
+    code += `        let r = rotateY(v[0], v[1], v[2], angle);\n`;
+    code += `        return r;\n`;
     code += `    });\n\n`;
+    code += `    // Calculate lighting with backface culling and z-sorting\n`;
+    code += `    const faceData = calculateFaceLighting(rotated3D, ${modelName}Faces, {x: 1, y: -1, z: 1});\n\n`;
+    code += `    // Project to 2D\n`;
+    code += `    const projected = rotated3D.map(v => project3D(v.x, v.y, v.z));\n\n`;
+    code += `    // Build triangles in sorted order (already culled and z-sorted)\n`;
     code += `    const triangles = [];\n`;
-    code += `    ${modelName}Faces.forEach(face => {\n`;
+    code += `    faceData.forEach(data => {\n`;
+    code += `        const face = ${modelName}Faces[data.faceIndex];\n`;
     code += `        const v1 = projected[face[0]];\n`;
     code += `        const v2 = projected[face[1]];\n`;
     code += `        const v3 = projected[face[2]];\n`;
+    code += `        const brightness = data.brightness;\n`;
+    code += `        \n`;
+    code += `        // Apply brightness to base color (0xCCCCCC = gray)\n`;
+    code += `        const baseColor = 0xCCCCCC;\n`;
+    code += `        const r = Math.floor(((baseColor >> 16) & 0xFF) * brightness);\n`;
+    code += `        const g = Math.floor(((baseColor >> 8) & 0xFF) * brightness);\n`;
+    code += `        const b = Math.floor((baseColor & 0xFF) * brightness);\n`;
+    code += `        const color = (r << 16) | (g << 8) | b;\n`;
+    code += `        \n`;
     code += `        triangles.push({\n`;
     code += `            x1: v1.x, y1: v1.y,\n`;
     code += `            x2: v2.x, y2: v2.y,\n`;
     code += `            x3: v3.x, y3: v3.y,\n`;
-    code += `            color: 0xCCCCCC  // Gray/white color\n`;
+    code += `            color: color\n`;
     code += `        });\n`;
     code += `    });\n\n`;
     code += `    drawTriangles(triangles);\n`;

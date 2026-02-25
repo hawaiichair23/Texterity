@@ -7,6 +7,7 @@ let scriptGraphicsMap = new Map(); // Map of scriptId -> Graphics object for per
 let scriptHitboxMap = new Map(); // Map of scriptId -> hitbox Graphics for interaction
 let scriptHoverBoxMap = new Map(); // Map of scriptId -> hover box Graphics for visual feedback
 let scriptPositionOffsets = new Map(); // Map of scriptId -> {x, y} position offsets for dragging
+let scriptBufferCache = new Map(); // Map of scriptId -> {vertices, colors, indices} reusable buffers
 let textObjects = new Map(); // Store multiple text objects by ID
 let globalLoopTimer = null; // Single global loop timer for all objects
 let clickThroughEnabled = false; // Track click-through mode state
@@ -80,13 +81,14 @@ class TextObject {
         this.dragOffset = { x: 0, y: 0 };
         this.customPosition = null;
         this.savedLinePositions = []; // Save exact Y position of each line
+        this.charState = []; // Per-character state: { scale, offsetX, offsetY, color }
         this.lastRenderedText = ''; // Track what text we last positioned for
         this.lastText = '';
         this.loopTimeout = null;
         this.isFocused = false;        this.settings = {
             fontSize: settings.fontSize || 48,
             fontFamily: settings.fontFamily || 'Instrument Serif',
-            color: settings.color || 0xFFFFFF,
+            color: settings.color !== undefined ? settings.color : 0xFFFFFF,
             loopAnimation: settings.loopAnimation !== false,
             outlineEnabled: settings.outlineEnabled !== false,
             outlineColor: settings.outlineColor || 0x000000,
@@ -338,9 +340,21 @@ class TextObject {
                 };
             }
 
+            // Add drop shadow if enabled
+            if (this.settings.dropShadow) {
+                textStyle.dropShadow = {
+                    color: this.settings.dropShadowColor !== undefined ? this.settings.dropShadowColor : 0x000000,
+                    alpha: this.settings.dropShadowAlpha !== undefined ? this.settings.dropShadowAlpha : 1,
+                    angle: this.settings.dropShadowAngle !== undefined ? this.settings.dropShadowAngle : Math.PI / 4,
+                    blur: this.settings.dropShadowBlur !== undefined ? this.settings.dropShadowBlur : 0,
+                    distance: this.settings.dropShadowDistance !== undefined ? this.settings.dropShadowDistance : 6,
+                };
+            }
+
             const splitText = new PIXI.SplitText({
                 text: line,
-                style: textStyle
+                style: textStyle,
+                charAnchor: 0.5
             });
             
             // Use saved Y position for this line - no calculation!
@@ -371,6 +385,15 @@ class TextObject {
             // Track total characters for next line
             totalChars += splitText.chars.length;
         });
+
+        // Init or preserve charState for new text, then apply to freshly built sprites
+        const charCount = inputText.replace(/\n/g, '').length;
+        if (this.charState.length !== charCount) {
+            this.initCharState(charCount);
+        }
+        this.applyCharState();
+
+        
 
         
         
@@ -621,7 +644,14 @@ class TextObject {
         }
         
         this.lastRenderedText = inputText;
-        
+
+        // Init charState if text length changed
+        const totalChars = inputText.replace(/\n/g, '').length;
+        if (this.charState.length !== totalChars) {
+            this.initCharState(totalChars);
+        }
+
+        let charStateIndex = 0;
         lines.forEach((line, lineIndex) => {
             const textStyle = {
                 fontFamily: this.settings.fontFamily,
@@ -644,68 +674,123 @@ class TextObject {
                 };
             }
 
+            // Add drop shadow if enabled
+            if (this.settings.dropShadow) {
+                textStyle.dropShadow = {
+                    color: this.settings.dropShadowColor !== undefined ? this.settings.dropShadowColor : 0x000000,
+                    alpha: this.settings.dropShadowAlpha !== undefined ? this.settings.dropShadowAlpha : 1,
+                    angle: this.settings.dropShadowAngle !== undefined ? this.settings.dropShadowAngle : Math.PI / 4,
+                    blur: this.settings.dropShadowBlur !== undefined ? this.settings.dropShadowBlur : 0,
+                    distance: this.settings.dropShadowDistance !== undefined ? this.settings.dropShadowDistance : 6,
+                };
+            }
+
             const splitText = new PIXI.SplitText({
                 text: line,
-                style: textStyle
+                style: textStyle,
+                charAnchor: 0.5
             });
             
             const yPos = this.savedLinePositions[lineIndex];
             splitText.x = centerX - (splitText.width / 2);
             splitText.y = yPos;
             
-            // Make all characters instantly visible (no animation)
-            splitText.chars.forEach(char => {
+            // Make all characters instantly visible and snapshot base positions
+            splitText.chars.forEach((char, i) => {
                 char.alpha = 1;
+                if (this.charState[charStateIndex + i]) {
+                    this.charState[charStateIndex + i].baseX = char.x;
+                    this.charState[charStateIndex + i].baseY = char.y;
+                }
             });
+            charStateIndex += splitText.chars.length;
             
             this.container.addChild(splitText);
         });
         
+        // Apply charState (scale, offsets, colors) to freshly laid-out sprites
+        this.applyCharState();
+        // Re-apply after a tick in case IPC char state updates arrive async
+        setTimeout(() => this.applyCharState(), 50);
+
         // Update hitbox
         setTimeout(() => {
             this.updateHitboxAndHoverbox();
-        }, 10);    }    // Set per-character offsets for script control
+        }, 10);
+    }
+
+    // Initialize charState to defaults for the current text length
+    initCharState(length) {
+        this.charState = [];
+        for (let i = 0; i < length; i++) {
+            this.charState.push({ scale: 1, baseX: 0, baseY: 0, offsetX: 0, offsetY: 0, jitterX: 0, jitterY: 0, color: null });
+        }
+    }
+
+    // Apply charState to all current sprites - called after every render
+    applyCharState() {
+        if (!this.container.children.length || !this.charState.length) return;
+        let charIndex = 0;
+        this.container.children.forEach(splitText => {
+            if (!splitText.chars) return;
+            splitText.chars.forEach(char => {
+                const state = this.charState[charIndex];
+                if (!state) { charIndex++; return; }
+                char.scale.set(state.scale);
+                char.x = state.baseX + state.offsetX + state.jitterX;
+                char.y = state.baseY + state.offsetY + state.jitterY;
+                if (state.color !== null && char.style) {
+                    char.style.fill = state.color;
+                }
+                charIndex++;
+            });
+        });
+    }
+
+    // Set per-character scale
+    setCharacterSize(sizes) {
+        sizes.forEach((size, i) => {
+            if (size != null) {
+                if (!this.charState[i]) this.charState[i] = { scale: 1, offsetX: 0, offsetY: 0, color: null };
+                this.charState[i].scale = size;
+            }
+        });
+        this.applyCharState();
+    }
+
+    // Set per-character offsets (used by animated effects like spiral)
     setCharacterOffsets(offsets) {
-        // offsets is an array of {x, y} objects, one per character
-        if (!this.container.children.length) return;
-        
-        let charIndex = 0;
-        this.container.children.forEach(splitText => {
-            if (splitText.chars) {
-                splitText.chars.forEach(char => {
-                    if (offsets[charIndex]) {
-                        const offset = offsets[charIndex];
-                        // Store original position if not already stored
-                        if (!char.userData) {
-                            char.userData = {
-                                originalX: char.x,
-                                originalY: char.y
-                            };
-                        }
-                        // Apply offset from original position
-                        char.x = char.userData.originalX + (offset.x || 0);
-                        char.y = char.userData.originalY + (offset.y || 0);
-                    }
-                    charIndex++;
-                });
+        offsets.forEach((offset, i) => {
+            if (offset) {
+                if (!this.charState[i]) this.charState[i] = { scale: 1, offsetX: 0, offsetY: 0, jitterX: 0, jitterY: 0, color: null };
+                this.charState[i].offsetX = offset.x || 0;
+                this.charState[i].offsetY = offset.y || 0;
             }
         });
-    }    // Set per-character colors for ombré effects
+        this.applyCharState();
+    }
+
+    // Set per-character jitter (static baseline nudge, composited separately from effects)
+    setCharacterJitter(offsets) {
+        offsets.forEach((offset, i) => {
+            if (offset) {
+                if (!this.charState[i]) this.charState[i] = { scale: 1, offsetX: 0, offsetY: 0, jitterX: 0, jitterY: 0, color: null };
+                this.charState[i].jitterX = offset.x || 0;
+                this.charState[i].jitterY = offset.y || 0;
+            }
+        });
+        this.applyCharState();
+    }
+
+    // Set per-character colors
     setCharacterColors(colors) {
-        // colors is an array of color values (0xRRGGBB), one per character
-        if (!this.container.children.length) return;
-        
-        let charIndex = 0;
-        this.container.children.forEach(splitText => {
-            if (splitText.chars) {
-                splitText.chars.forEach(char => {
-                    if (colors[charIndex] !== undefined && char.style) {
-                        char.style.fill = colors[charIndex];
-                    }
-                    charIndex++;
-                });
+        colors.forEach((color, i) => {
+            if (color !== undefined) {
+                if (!this.charState[i]) this.charState[i] = { scale: 1, offsetX: 0, offsetY: 0, color: null };
+                this.charState[i].color = color;
             }
         });
+        this.applyCharState();
     }
     
     destroy() {
@@ -840,8 +925,22 @@ ipcRenderer.on('create-text-object', (event, data) => {
     app.stage.addChild(textObj.hoverBox);
     
     if (data.text) {
-        textObj.animateText(data.text);
+        textObj.setTextInstant(data.text);
     }
+    if (data.charSizes) {
+        textObj.setCharacterSize(data.charSizes);
+    }
+});
+
+
+ipcRenderer.on('set-character-size', (event, { id, sizes }) => {
+    const textObj = textObjects.get(id);
+    if (textObj) textObj.setCharacterSize(sizes);
+});
+
+ipcRenderer.on('set-character-jitter', (event, { id, offsets }) => {
+    const textObj = textObjects.get(id);
+    if (textObj) textObj.setCharacterJitter(offsets);
 });
 
 ipcRenderer.on('delete-text-object', (event, id) => {
@@ -910,6 +1009,12 @@ ipcRenderer.on('update-text-object-settings', (event, data) => {
         if (data.fontSize !== undefined) settings.fontSize = data.fontSize;
         if (data.fontFamily !== undefined) settings.fontFamily = data.fontFamily;
         if (data.color !== undefined) settings.color = data.color;
+        if (data.dropShadow !== undefined) settings.dropShadow = data.dropShadow;
+        if (data.dropShadowColor !== undefined) settings.dropShadowColor = data.dropShadowColor;
+        if (data.dropShadowAlpha !== undefined) settings.dropShadowAlpha = data.dropShadowAlpha;
+        if (data.dropShadowAngle !== undefined) settings.dropShadowAngle = data.dropShadowAngle;
+        if (data.dropShadowBlur !== undefined) settings.dropShadowBlur = data.dropShadowBlur;
+        if (data.dropShadowDistance !== undefined) settings.dropShadowDistance = data.dropShadowDistance;
         if (data.loopAnimation !== undefined) settings.loopAnimation = data.loopAnimation;
         if (data.outlineEnabled !== undefined) settings.outlineEnabled = data.outlineEnabled;
         if (data.outlineColor !== undefined) settings.outlineColor = data.outlineColor;
@@ -1026,11 +1131,14 @@ ipcRenderer.on('load-google-font', async (event, { fontFamily, fontFileName, fon
         if (fontPath) {
             const fontData = fs.readFileSync(fontPath);
             const base64Font = fontData.toString('base64');
+            const isOtf = fontPath.toLowerCase().endsWith('.otf');
+            const fontFormat = isOtf ? 'opentype' : 'truetype';
+            const mimeType = isOtf ? 'font/otf' : 'font/truetype';
             
             style.textContent = `
                 @font-face {
                     font-family: "${fontFamily}";
-                    src: url(data:font/truetype;charset=utf-8;base64,${base64Font}) format("truetype");
+                    src: url(data:${mimeType};charset=utf-8;base64,${base64Font}) format("${fontFormat}");
                 }
             `;
         } else {
@@ -1137,17 +1245,146 @@ ipcRenderer.on('start-animation', (event, data) => {
             },            project3D: (x, y, z, distance = 500) => {
                 const scale = distance / (distance + z);
                 return { x: x * scale + 640, y: y * scale + 360 };
-            },
-            drawTriangles: (triangles) => {
-                // Get this script's graphics object
-                let graphics = scriptGraphicsMap.get(scriptId);
+            },            calculateFaceLighting: (vertices3D, faces, lightDir = {x: 1, y: -1, z: 1}) => {
+                // Normalize light direction
+                const lightLen = Math.sqrt(lightDir.x * lightDir.x + lightDir.y * lightDir.y + lightDir.z * lightDir.z);
+                const lightNorm = {
+                    x: lightDir.x / lightLen,
+                    y: lightDir.y / lightLen,
+                    z: lightDir.z / lightLen
+                };
+                
+                // Camera is at origin looking down -Z axis
+                const cameraPos = { x: 0, y: 0, z: 0 };
+                
+                // Calculate brightness for each face WITH backface culling and z-depth
+                const faceData = [];
+                
+                for (let i = 0; i < faces.length; i++) {
+                    const face = faces[i];
+                    const v1 = vertices3D[face[0]];
+                    const v2 = vertices3D[face[1]];
+                    const v3 = vertices3D[face[2]];
+                    
+                    // Calculate two edges of the triangle
+                    const edge1 = {
+                        x: v2.x - v1.x,
+                        y: v2.y - v1.y,
+                        z: v2.z - v1.z
+                    };
+                    
+                    const edge2 = {
+                        x: v3.x - v1.x,
+                        y: v3.y - v1.y,
+                        z: v3.z - v1.z
+                    };
+                    
+                    // Calculate normal (cross product)
+                    const normal = {
+                        x: edge1.y * edge2.z - edge1.z * edge2.y,
+                        y: edge1.z * edge2.x - edge1.x * edge2.z,
+                        z: edge1.x * edge2.y - edge1.y * edge2.x
+                    };
+                    
+                    // Normalize the normal
+                    const normalLen = Math.sqrt(normal.x * normal.x + normal.y * normal.y + normal.z * normal.z);
+                    if (normalLen > 0) {
+                        normal.x /= normalLen;
+                        normal.y /= normalLen;
+                        normal.z /= normalLen;
+                    }
+                    
+                    // BACKFACE CULLING: Calculate camera vector (from camera to triangle)
+                    const camVec = {
+                        x: v1.x - cameraPos.x,
+                        y: v1.y - cameraPos.y,
+                        z: v1.z - cameraPos.z
+                    };
+                    
+                    // Dot product - if positive, triangle faces away from camera, cull it
+                    const facing = normal.x * camVec.x + normal.y * camVec.y + normal.z * camVec.z;
+                    
+                    if (facing >= 0) {
+                        // Backface - skip it
+                        continue;
+                    }
+                    
+                    // Calculate lighting (dot product with light direction)
+                    let brightness = normal.x * lightNorm.x + normal.y * lightNorm.y + normal.z * lightNorm.z;
+                    
+                    // Clamp to 0-1 and add ambient light
+                    brightness = Math.max(0, brightness);
+                    brightness = 0.3 + brightness * 0.7; // 30% ambient + 70% directional
+                    
+                    // Calculate average Z depth for sorting (painter's algorithm)
+                    const avgZ = (v1.z + v2.z + v3.z) / 3;                    faceData.push({
+                        faceIndex: i,
+                        brightness: brightness,
+                        avgZ: avgZ
+                    });
+                }                // Z-SORT: Sort by average Z (farthest first)
+                faceData.sort((a, b) => b.avgZ - a.avgZ);
+                
+                // Return array of brightness values in sorted order with original face indices
+                return faceData.map(data => ({
+                    faceIndex: data.faceIndex,
+                    brightness: data.brightness
+                }));
+            },            drawTriangles: (triangles) => {
+                // Get this script's mesh object
+                let mesh = scriptGraphicsMap.get(scriptId);
+                let geometry = null;
                 
                 // If it doesn't exist yet, create it
-                if (!graphics) {
-                    graphics = new PIXI.Graphics();
-                    graphics.zIndex = -0.5; // Between background (-1) and text (0)
-                    app.stage.addChild(graphics);
-                    scriptGraphicsMap.set(scriptId, graphics);
+                if (!mesh) {
+                    // Use MeshGeometry - the CORRECT API for PixiJS v8
+                    geometry = new PIXI.MeshGeometry({
+                        positions: new Float32Array([0, 0]),
+                        uvs: new Float32Array([0, 0]),
+                        indices: new Uint32Array([0])
+                    });
+                    
+                    // Add custom color attribute AFTER creation
+                    geometry.addAttribute('aColor', new Float32Array([1, 1, 1, 1]), 4);                    // Create shader using PixiJS v8 API with WebGL 1 compatible GLSL
+                    // MeshGeometry uses aPosition (from positions property)
+                    const glProgram = PIXI.GlProgram.from({
+                        vertex: `
+                            attribute vec2 aPosition;
+                            attribute vec4 aColor;
+                            
+                            varying vec4 vColor;
+                            
+                            uniform mat3 uProjectionMatrix;
+                            uniform mat3 uWorldTransformMatrix;
+                            uniform mat3 uTransformMatrix;
+                            
+                            void main() {
+                                vColor = aColor;
+                                mat3 mvp = uProjectionMatrix * uWorldTransformMatrix * uTransformMatrix;
+                                gl_Position = vec4((mvp * vec3(aPosition, 1.0)).xy, 0.0, 1.0);
+                            }
+                        `,
+                        fragment: `
+                            precision mediump float;
+                            varying vec4 vColor;
+                            
+                            void main() {
+                                gl_FragColor = vColor;
+                            }
+                        `
+                    });
+                    
+                    const shader = new PIXI.Shader({
+                        glProgram,
+                        resources: {}
+                    });
+                    
+                    mesh = new PIXI.Mesh({geometry, shader});
+                    mesh.zIndex = -0.5; // Between background (-1) and text (0)
+                    app.stage.addChild(mesh);
+                    scriptGraphicsMap.set(scriptId, mesh);
+                } else {
+                    geometry = mesh.geometry;
                 }
                 
                 // Get or create hitbox and hover box
@@ -1158,7 +1395,8 @@ ipcRenderer.on('start-animation', (event, data) => {
                     // Create invisible hitbox for interaction
                     hitBox = new PIXI.Graphics();
                     hitBox.eventMode = 'static';
-                    hitBox.cursor = 'pointer';                    hitBox.zIndex = 1;
+                    hitBox.cursor = 'pointer';
+                    hitBox.zIndex = 1;
                     app.stage.addChild(hitBox);
                     scriptHitboxMap.set(scriptId, hitBox);
                     
@@ -1191,12 +1429,10 @@ ipcRenderer.on('start-animation', (event, data) => {
                         if (!isDragging) {
                             ipcRenderer.send('restore-click-through-state');
                         }
-                    });
-                    
-                    hitBox.on('pointerdown', (event) => {
+                    });                    hitBox.on('pointerdown', (event) => {
                         isDragging = true;
                         const position = event.data.global;
-                        const bounds = graphics.getBounds();
+                        const bounds = mesh.getBounds();
                         dragOffset.x = position.x - bounds.x;
                         dragOffset.y = position.y - bounds.y;
                         
@@ -1206,7 +1442,7 @@ ipcRenderer.on('start-animation', (event, data) => {
                     const onDragMove = (event) => {
                         if (isDragging) {
                             const position = event.data.global;
-                            const bounds = graphics.getBounds();
+                            const bounds = mesh.getBounds();
                             
                             const newX = position.x - dragOffset.x;
                             const newY = position.y - dragOffset.y;
@@ -1233,15 +1469,19 @@ ipcRenderer.on('start-animation', (event, data) => {
                     app.stage.on('pointerupoutside', onDragEnd);
                 }
                 
-                // Apply position offset before drawing
+                // Apply position offset
                 const offset = scriptPositionOffsets.get(scriptId) || { x: 0, y: 0 };
                 
-                graphics.clear();
+                // Build vertex and color arrays for GPU
+                const vertices = [];
+                const colors = [];
+                const indices = [];
                 
                 // Track bounds for hitbox
                 let minX = Infinity, minY = Infinity;
                 let maxX = -Infinity, maxY = -Infinity;
                 
+                let vertexIndex = 0;
                 triangles.forEach(tri => {
                     // Apply offset to triangle coordinates
                     const x1 = tri.x1 + offset.x;
@@ -1251,23 +1491,83 @@ ipcRenderer.on('start-animation', (event, data) => {
                     const x3 = tri.x3 + offset.x;
                     const y3 = tri.y3 + offset.y;
                     
-                    graphics.poly([x1, y1, x2, y2, x3, y3]);
+                    // Add vertices
+                    vertices.push(x1, y1, x2, y2, x3, y3);
                     
-                    // Support both plain color and {color, alpha} object
+                    // Convert color to RGBA (0-1 range)
+                    let color = tri.color;
+                    let alpha = 1.0;
+                    
                     if (typeof tri.color === 'object' && tri.color.color !== undefined) {
-                        graphics.fill({ color: tri.color.color, alpha: tri.color.alpha });
+                        color = tri.color.color;
+                        alpha = tri.color.alpha !== undefined ? tri.color.alpha : 1.0;
                     } else if (tri.alpha !== undefined) {
-                        graphics.fill({ color: tri.color, alpha: tri.alpha });
-                    } else {
-                        graphics.fill(tri.color);
-                    }                    // Track bounds
+                        alpha = tri.alpha;
+                    }
+                    
+                    const r = ((color >> 16) & 0xFF) / 255;
+                    const g = ((color >> 8) & 0xFF) / 255;
+                    const b = (color & 0xFF) / 255;
+                    
+                    // Add color for each vertex (same color for all 3 vertices)
+                    for (let i = 0; i < 3; i++) {
+                        colors.push(r, g, b, alpha);
+                    }
+                    
+                    // Add indices (each triangle is already 3 vertices)
+                    indices.push(vertexIndex, vertexIndex + 1, vertexIndex + 2);
+                    vertexIndex += 3;
+                    
+                    // Track bounds
                     minX = Math.min(minX, x1, x2, x3);
                     minY = Math.min(minY, y1, y2, y3);
                     maxX = Math.max(maxX, x1, x2, x3);
-                    maxY = Math.max(maxY, y1, y2, y3);
-                });
+                    maxY = Math.max(maxY, y1, y2, y3);                });                // Update geometry buffers - MeshGeometry direct update
+                // Reuse buffers when size matches to avoid garbage collection
+                let bufferCache = scriptBufferCache.get(scriptId);
                 
-                // Update hitbox and hover box
+                // Check if we can reuse existing buffers
+                if (bufferCache && 
+                    bufferCache.verticesLength === vertices.length &&
+                    bufferCache.colorsLength === colors.length &&
+                    bufferCache.indicesLength === indices.length) {
+                    
+                    // Reuse existing typed arrays - just update values
+                    for (let i = 0; i < vertices.length; i++) {
+                        bufferCache.verticesArray[i] = vertices[i];
+                    }
+                    for (let i = 0; i < colors.length; i++) {
+                        bufferCache.colorsArray[i] = colors[i];
+                    }
+                    for (let i = 0; i < indices.length; i++) {
+                        bufferCache.indicesArray[i] = indices[i];
+                    }
+                    
+                    geometry.positions = bufferCache.verticesArray;
+                    geometry.indices = bufferCache.indicesArray;
+                    geometry.getBuffer('aColor').data = bufferCache.colorsArray;
+                } else {
+                    // Create new typed arrays (first time or size changed)
+                    const verticesArray = new Float32Array(vertices);
+                    const colorsArray = new Float32Array(colors);
+                    const indicesArray = new Uint32Array(indices);
+                    
+                    geometry.positions = verticesArray;
+                    geometry.indices = indicesArray;
+                    geometry.getBuffer('aColor').data = colorsArray;
+                    
+                    // Cache for next frame
+                    scriptBufferCache.set(scriptId, {
+                        verticesArray,
+                        colorsArray,
+                        indicesArray,
+                        verticesLength: vertices.length,
+                        colorsLength: colors.length,
+                        indicesLength: indices.length
+                    });
+                }
+                
+                // Update hitbox and hover box every frame for smooth interaction
                 const padding = 10;
                 hitBox.clear();
                 hitBox.rect(minX - padding, minY - padding, (maxX - minX) + padding * 2, (maxY - minY) + padding * 2);
@@ -1279,25 +1579,22 @@ ipcRenderer.on('start-animation', (event, data) => {
                 hoverBox.stroke({ width: 1, color: neonColor });
             },
             animationCallback: null  // Will be set by startAnimation call
-        };
-        
-        // Execute the script with animation context
+        };        // Execute the script with animation context
         const scriptFunc = new Function(
-            'rotateX', 'rotateY', 'rotateZ', 'project3D', 'drawTriangles', 'startAnimation',
+            'rotateX', 'rotateY', 'rotateZ', 'project3D', 'calculateFaceLighting', 'drawTriangles', 'startAnimation',
             code
         );
         
         // Provide startAnimation function that captures the callback
         const startAnimationFunc = (callback) => {
             animationContext.animationCallback = callback;
-        };
-        
-        // Execute script to set up variables and capture animation callback
+        };        // Execute script to set up variables and capture animation callback
         scriptFunc(
             animationContext.rotateX,
             animationContext.rotateY,
             animationContext.rotateZ,
             animationContext.project3D,
+            animationContext.calculateFaceLighting,
             animationContext.drawTriangles,
             startAnimationFunc
         );
@@ -1326,6 +1623,9 @@ ipcRenderer.on('stop-animation', (event, data) => {
         app.ticker.remove(animationCallbacks.get(scriptId));
         animationCallbacks.delete(scriptId);
     }
+    
+    // Clean up buffer cache
+    scriptBufferCache.delete(scriptId);
     
     // Clean up this script's graphics object
     if (scriptGraphicsMap.has(scriptId)) {
