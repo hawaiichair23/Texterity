@@ -2,14 +2,14 @@ const { app, BrowserWindow, ipcMain, dialog, screen, Menu, nativeTheme } = requi
 const path = require('path');
 const fs = require('fs');
 const chokidar = require('chokidar');
-const keychain = require('./keychain-manager');
-const settings = require('./settings-manager');
+const keychain = require('./managers/keychain-manager');
+const settings = require('./managers/settings-manager');
 const opentype = require('opentype.js');
 
 let controlWindow;
 let overlayWindow;
 let scriptEditorWindows = {}; // Track script editor windows by script ID
-let fileWatcher = null;
+const fileWatchers = new Map(); // keyed by text object id
 let userSettings = null; // Global settings object
 
 function createControlWindow() {
@@ -20,7 +20,7 @@ function createControlWindow() {
     const controlWidth = Math.floor(400 * scale);
     const controlHeight = Math.floor(726 * scale);
     const overlayWidth = Math.floor(1280 * scale);
-    const controlX = 100 + overlayWidth - 8;  // 8px closer
+    const controlX = 100 + overlayWidth - 8;  
     
     controlWindow = new BrowserWindow({
         width: controlWidth,
@@ -34,7 +34,7 @@ function createControlWindow() {
             nodeIntegration: true,
             contextIsolation: false
         }
-    });    controlWindow.loadFile('control.html');
+    });    controlWindow.loadFile('src/control.html');
     
     // Create menu bar
     const menuTemplate = [
@@ -82,11 +82,11 @@ function createControlWindow() {
     ];
     
     const menu = Menu.buildFromTemplate(menuTemplate);
-    Menu.setApplicationMenu(menu);  // Use application menu instead of window menu
-    // Send settings AFTER DOM is fully loaded
+    Menu.setApplicationMenu(menu); 
+   
     controlWindow.webContents.on('did-finish-load', () => {
         controlWindow.webContents.send('user-settings-loaded', userSettings);
-    });    // Open dev tools with Ctrl+Shift+I
+    });   
     controlWindow.webContents.on('before-input-event', (event, input) => {
         if (input.control && input.shift && input.key.toLowerCase() === 'i') {
             controlWindow.webContents.toggleDevTools();
@@ -123,7 +123,7 @@ function createScriptEditorWindow(scriptData) {
             nodeIntegration: true,
             contextIsolation: false
         }
-    });    editorWindow.loadFile('script-editor.html');
+    });    editorWindow.loadFile('src/script-editor.html');
     
     // Create minimal menu with Edit for copy/paste support
     const editorMenuTemplate = [
@@ -187,7 +187,7 @@ function createOverlayWindow() {
             nodeIntegration: true,
             contextIsolation: false
         }
-    });    overlayWindow.loadFile('overlay.html');
+    });    overlayWindow.loadFile('src/overlay.html');
     overlayWindow.setMenu(null);  // Remove "File Edit View" menu but keep title bar buttons
     
     // Ensure click-through is disabled on startup
@@ -223,18 +223,49 @@ app.on('window-all-closed', () => {
     if (process.platform !== 'darwin') app.quit();
 });
 
-// Forward settings from control to overlay
-ipcMain.on('update-settings', (event, settings) => {
-    if (overlayWindow && !overlayWindow.isDestroyed()) {
-        overlayWindow.webContents.send('update-settings', settings);
-    }
+// Relay channels that send to overlay
+const TO_OVERLAY = [
+    'update-settings',
+    'render-text',
+    'load-custom-font',
+    'load-google-font',
+    'unfocus-all-text-objects',
+    'create-text-object',
+    'delete-text-object',
+    'update-text-object',
+    'update-text-object-position',
+    'update-character-offsets',
+    'draw-triangle',
+    'clear-triangles',
+    'draw-triangles-batch',
+    'start-animation',
+    'stop-animation',
+    'update-text-object-settings',
+    'update-background',
+    'update-animation-settings',
+    'toggle-overlay-controls',
+    'reset-text-position',
+];
+
+TO_OVERLAY.forEach(channel => {
+    ipcMain.on(channel, (_, data) => {
+        if (overlayWindow && !overlayWindow.isDestroyed())
+            overlayWindow.webContents.send(channel, data);
+    });
 });
 
-// Forward text updates from control to overlay
-ipcMain.on('render-text', (event, text) => {
-    if (overlayWindow && !overlayWindow.isDestroyed()) {
-        overlayWindow.webContents.send('render-text', text);
-    }
+const TO_CONTROL = [
+    'overlay-visibility-changed',
+    'position-updated',
+    'position-drag-ended',
+    'text-object-focused',
+];
+
+TO_CONTROL.forEach(channel => {
+    ipcMain.on(channel, (_, data) => {
+        if (controlWindow && !controlWindow.isDestroyed())
+            controlWindow.webContents.send(channel, data);
+    });
 });
 
 // Window controls for overlay
@@ -268,7 +299,6 @@ ipcMain.on('toggle-click-through', (event, enabled) => {
     if (overlayWindow && !overlayWindow.isDestroyed()) {
         overlayWindow.setIgnoreMouseEvents(enabled, { forward: true });
         overlayWindow.setAlwaysOnTop(enabled);
-        // Notify overlay of click-through state change
         overlayWindow.webContents.send('click-through-mode-changed', enabled);
     }
 });
@@ -284,13 +314,6 @@ ipcMain.on('set-click-through-temporarily', (event, enabled) => {
 ipcMain.on('restore-click-through-state', () => {
     if (overlayWindow && !overlayWindow.isDestroyed()) {
         overlayWindow.setIgnoreMouseEvents(clickThroughEnabled, { forward: true });
-    }
-});
-
-// Unfocus all text objects (when entering click-through mode)
-ipcMain.on('unfocus-all-text-objects', () => {
-    if (overlayWindow && !overlayWindow.isDestroyed()) {
-        overlayWindow.webContents.send('unfocus-all-text-objects');
     }
 });
 
@@ -360,28 +383,14 @@ ipcMain.on('open-obj-dialog', (event) => {
     });
 });
 
-// Load custom font in overlay
-ipcMain.on('load-custom-font', (event, { fontFamily, fontPath }) => {
-    if (overlayWindow && !overlayWindow.isDestroyed()) {
-        overlayWindow.webContents.send('load-custom-font', { fontFamily, fontPath });
-    }
-});
-
-// Load Google Font in overlay
-ipcMain.on('load-google-font', (event, { fontFamily }) => {
-    if (overlayWindow && !overlayWindow.isDestroyed()) {
-        overlayWindow.webContents.send('load-google-font', { fontFamily });
-    }
-});
-
 // Start watching a file
 ipcMain.on('start-file-watch', (event, { id, filePath }) => {
-    
-    // Stop existing watcher if any
-    if (fileWatcher) {
-        fileWatcher.close();
+    // Stop existing watcher for this id if any
+    if (fileWatchers.has(id)) {
+        fileWatchers.get(id).close();
+        fileWatchers.delete(id);
     }
-    
+
     // Read initial content
     fs.readFile(filePath, 'utf-8', (err, data) => {
         if (!err) {
@@ -390,27 +399,29 @@ ipcMain.on('start-file-watch', (event, { id, filePath }) => {
             console.error('Error reading file:', err);
         }
     });
-    
+
     // Start watching for changes
-    fileWatcher = chokidar.watch(filePath, {
+    const watcher = chokidar.watch(filePath, {
         persistent: true,
         ignoreInitial: true
     });
-    
-    fileWatcher.on('change', () => {
+
+    watcher.on('change', () => {
         fs.readFile(filePath, 'utf-8', (err, data) => {
             if (!err && controlWindow && !controlWindow.isDestroyed()) {
                 controlWindow.webContents.send('file-content-update', { id, content: data });
             }
         });
     });
+
+    fileWatchers.set(id, watcher);
 });
 
-// Stop watching file
-ipcMain.on('stop-file-watch', () => {
-    if (fileWatcher) {
-        fileWatcher.close();
-        fileWatcher = null;
+// Stop watching file for a specific text object
+ipcMain.on('stop-file-watch', (event, id) => {
+    if (fileWatchers.has(id)) {
+        fileWatchers.get(id).close();
+        fileWatchers.delete(id);
     }
 });
 
@@ -424,93 +435,13 @@ ipcMain.on('confirm-close', () => {
 });
 
 ipcMain.on('cancel-close', () => {
-    // Do nothing, window stays open
-});
-
-// NEW: Multiple text object handlers
-ipcMain.on('create-text-object', (event, textObject) => {
-    if (overlayWindow && !overlayWindow.isDestroyed()) {
-        overlayWindow.webContents.send('create-text-object', textObject);
-    }
-});
-
-ipcMain.on('delete-text-object', (event, id) => {
-    if (overlayWindow && !overlayWindow.isDestroyed()) {
-        overlayWindow.webContents.send('delete-text-object', id);
-    }
-});
-
-ipcMain.on('update-text-object', (event, data) => {
-    if (overlayWindow && !overlayWindow.isDestroyed()) {
-        overlayWindow.webContents.send('update-text-object', data);
-    }
-});
-
-ipcMain.on('update-text-object-position', (event, data) => {
-    if (overlayWindow && !overlayWindow.isDestroyed()) {
-        overlayWindow.webContents.send('update-text-object-position', data);
-    }
-});
-
-ipcMain.on('update-character-offsets', (event, data) => {
-    if (overlayWindow && !overlayWindow.isDestroyed()) {
-        overlayWindow.webContents.send('update-character-offsets', data);
-    }
-});
-
-ipcMain.on('draw-triangle', (event, data) => {
-    if (overlayWindow && !overlayWindow.isDestroyed()) {
-        overlayWindow.webContents.send('draw-triangle', data);
-    }
-});
-
-ipcMain.on('clear-triangles', () => {
-    if (overlayWindow && !overlayWindow.isDestroyed()) {
-        overlayWindow.webContents.send('clear-triangles');
-    }
-});
-
-ipcMain.on('draw-triangles-batch', (event, data) => {
-    if (overlayWindow && !overlayWindow.isDestroyed()) {
-        overlayWindow.webContents.send('draw-triangles-batch', data);
-    }
-});
-
-ipcMain.on('start-animation', (event, data) => {
-    if (overlayWindow && !overlayWindow.isDestroyed()) {
-        overlayWindow.webContents.send('start-animation', data);
-    }
-});
-
-ipcMain.on('stop-animation', (event, data) => {
-    if (overlayWindow && !overlayWindow.isDestroyed()) {
-        overlayWindow.webContents.send('stop-animation', data);
-    }
-});
-
-ipcMain.on('overlay-visibility-changed', (event, isHidden) => {
-    if (controlWindow && !controlWindow.isDestroyed()) {
-        controlWindow.webContents.send('overlay-visibility-changed', isHidden);
-    }
-});
-
-ipcMain.on('update-text-object-settings', (event, data) => {
-    if (overlayWindow && !overlayWindow.isDestroyed()) {
-        overlayWindow.webContents.send('update-text-object-settings', data);
-    }
-});
-
-ipcMain.on('update-background', (event, bgSettings) => {
-    if (overlayWindow && !overlayWindow.isDestroyed()) {
-        overlayWindow.webContents.send('update-background', bgSettings);
-    }
 });
 
 // Save project
 ipcMain.on('save-project', (event, projectData) => {
     dialog.showSaveDialog(controlWindow, {
         title: 'Save Texterity Project',
-        defaultPath: 'texterity-project.json',
+        defaultPath: path.join(__dirname, 'saves', 'texterity-project.json'),
         filters: [
             { name: 'Texterity Project', extensions: ['json'] },
             { name: 'All Files', extensions: ['*'] }
@@ -567,19 +498,7 @@ ipcMain.on('load-project', (event) => {
     });
 });
 
-ipcMain.on('position-updated', (event, data) => {
-    if (controlWindow && !controlWindow.isDestroyed()) {
-        controlWindow.webContents.send('position-updated', data);
-    }
-});
-
-ipcMain.on('position-drag-ended', (event, data) => {
-    if (controlWindow && !controlWindow.isDestroyed()) {
-        controlWindow.webContents.send('position-drag-ended', data);
-    }
-});
-
-// Undo/Redo requests from overlay window
+// Undo/Redo requests from overlay window (channel rename — kept explicit)
 ipcMain.on('request-undo', () => {
     if (controlWindow && !controlWindow.isDestroyed()) {
         controlWindow.webContents.send('trigger-undo');
@@ -598,19 +517,6 @@ ipcMain.on('save-user-settings', (event, newSettings) => {
     settings.saveSettings(userSettings);
 });
 
-
-ipcMain.on('update-animation-settings', (event, settings) => {
-    if (overlayWindow && !overlayWindow.isDestroyed()) {
-        overlayWindow.webContents.send('update-animation-settings', settings);
-    }
-});
-
-// Toggle overlay window controls visibility
-ipcMain.on('toggle-overlay-controls', (event, show) => {
-    if (overlayWindow && !overlayWindow.isDestroyed()) {
-        overlayWindow.webContents.send('toggle-overlay-controls', show);
-    }
-});
 
 // Keychain API key management
 ipcMain.on('save-api-key', async (event, { keyType, value }) => {
@@ -635,7 +541,6 @@ ipcMain.on('delete-api-key', async (event, keyType) => {
 
 // User settings management
 ipcMain.on('get-user-settings', (event) => {
-    // console.log('Sending settings:', JSON.stringify(userSettings, null, 2));
     event.sender.send('user-settings-loaded', userSettings);
 });
 
@@ -650,20 +555,6 @@ ipcMain.on('update-user-setting', (event, data) => {
     const { path, value } = data;
     userSettings = settings.updateSetting(userSettings, path, value);
     settings.saveSettings(userSettings);
-});
-
-// Reset text position to center of overlay window
-ipcMain.on('reset-text-position', (event, data) => {
-    if (overlayWindow && !overlayWindow.isDestroyed()) {
-        overlayWindow.webContents.send('reset-text-position', data);
-    }
-});
-
-// Forward text object focus from overlay to control
-ipcMain.on('text-object-focused', (event, id) => {
-    if (controlWindow && !controlWindow.isDestroyed()) {
-        controlWindow.webContents.send('text-object-focused', id);
-    }
 });
 
 // Script Editor IPC Handlers
