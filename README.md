@@ -1,5 +1,5 @@
 
-# ![Animationletters2](https://github.com/user-attachments/assets/36bed92d-9ee5-429f-9df3-e2cf7a788d95)
+![Animationletters2](https://github.com/user-attachments/assets/36bed92d-9ee5-429f-9df3-e2cf7a788d95)
 
 # Texterity
 
@@ -7,20 +7,15 @@ A realtime animated text overlay engine for streamers, built with Electron and P
 
 Texterity lets you place animated, fully customizable text objects over your stream canvas, controlled in real time from a separate panel without interrupting your layout. The overlay window can be made completely invisible and click-through over the desktop and any apps underneath. 
 
----
-
 ## Text Objects
 
 Texterity uses text objects. These objects can be independently modified either in the overlay directly, or in the control panel. They can be dragged anywhere on screen or resized in real time. You can click directly on any text object in the overlay to highlight its corresponding panel in the control UI. Text objects are also exposed to the API for programmatic control. 
 
 In click-through mode, text objects temporarily suspend click-through only when hovered, letting you grab and reposition them freely while using the desktop.
 
-
----
-
 ## Scripting
 
-The scripting engine is a Monaco editor that exposes an API surface to every text object on the overlay. From a script you can set text content and animate individual characters by adjusting their X/Y offsets, scale, color, and timing, either manually or through built-in helpers like `waveEffect`, `spiralInEffect`, and `fadeIn`. Characters are individually controllable while the word's font, size, and kerning are preserved so effects stay typographically clean. The editor includes full syntax highlighting, autocomplete, and an integrated console.
+The scripting engine exposes an API surface to every text object on the overlay. From a script you can set text content and animate individual characters by adjusting their X/Y offsets, scale, color, and timing, either manually or through built-in helpers like `waveEffect`, `spiralInEffect`, and `fadeIn`. Characters are individually controllable while the word's font, size, and kerning are preserved so effects stay typographically clean. The editor includes full syntax highlighting, autocomplete, and an integrated console.
 
 ## Features
 
@@ -35,13 +30,10 @@ The scripting engine is a Monaco editor that exposes an API surface to every tex
 - **Click-through overlay** — the overlay is invisible and non-interactive; individual text objects intercept mouse events only on hover, making them feel like floating desktop items you can grab and move at any time
 - **Secure API key storage** — keys encrypted via OS keychain
 
----
-
 ## 3D Rendering
 
 Texterity includes a software 3D rendering pipeline built directly on top of PixiJS's triangle drawing primitives. Texterity can load `.obj` files, parse vertex and face data, and render the geometry onto the overlay from scratch, including backface culling and surface normal calculations for per-face lighting. Triangles are submitted in batched draw calls for performance. The classic Utah Teapot is included in **obj_files/** as a test model.
 
----
 
 ## Architecture
 
@@ -50,7 +42,6 @@ Texterity runs as two Electron windows communicating over IPC:
 - **Control panel** — the UI for managing text objects, animations, scripts, and settings
 - **Overlay** — a transparent frameless window rendered entirely with PixiJS, sitting over your desktop
 
----
 
 ## Roadmap
 
@@ -58,7 +49,6 @@ Texterity runs as two Electron windows communicating over IPC:
 
 **GPU pipeline** — the rendering layer is being moved toward a fully GPU-driven pipeline for high framerate animations at scale.
 
----
 
 ## Tech Stack
 
