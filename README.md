@@ -52,6 +52,7 @@ Texterity runs as two Electron windows communicating over IPC:
 
 **GPU pipeline** — the rendering layer is being moved toward a fully GPU-driven pipeline for high framerate animations at scale.
 
+**Video export** — Scripts can be layered and offset so animations will start at a specific point in a video. The overlay renders to a transparent WebM, which ffmpeg composites directly onto the source file. Drop in the video, set timecode and export. No After Effects expertise required.
 
 ## Tech Stack
 
