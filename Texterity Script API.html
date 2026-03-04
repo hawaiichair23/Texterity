@@ -58,7 +58,7 @@
         .nav-logo {
             font-family: 'Instrument Serif', serif;
             font-style: italic;
-            font-size: 22px;
+            font-size: 26px;
             color: var(--text);
             padding: 0 24px 28px;
             border-bottom: 1px solid var(--border);
@@ -107,7 +107,7 @@
         main {
             flex: 1;
             padding: 60px 72px;
-            max-width: 860px;
+            max-width: 1200px;
         }
 
         header {
@@ -152,6 +152,24 @@
             border-radius: 8px;
             margin-bottom: 20px;
             overflow: hidden;
+        }
+
+        #preview-sidebar {
+            padding: 2400px 40px 60px 0;
+            display: flex;
+            flex-direction: column;
+            gap: 12px;
+        }
+
+        .fn-card-preview {
+            width: 220px;
+            background: #0c0c0f;
+            border: none;
+            border-radius: 18px;
+            display: flex;
+            padding-top: 20px;
+            align-items: center;
+            justify-content: center;
         }
 
         .fn-header {
@@ -323,9 +341,10 @@
     <main>
         <header>
             <h1>The Spellbook</h1>
-            <p>Texterity Script API reference — every function, param, and default.</p>
+            <p>Texterity Script API reference</p>
         </header>
 
+        <div style="max-width:860px;">
         <!-- TEXT OBJECTS -->
         <section id="text-objects">
             <h2>Text Objects</h2>
@@ -912,19 +931,20 @@ console.<span class="fn">error</span>(<span class="str">'something broke'</span>
             </div>
 
         </section>
+        </div><!-- end narrow -->
 
-        <!-- 3D EXAMPLES -->
         <section id="3d-examples">
             <h2>3D Examples</h2>
 
-            <div class="fn-card">
+            <div style="display:flex; flex-direction:row; gap:24px; align-items:flex-start; margin-bottom:20px;">
+            <div class="fn-card" style="flex:1; min-width:0; margin-bottom:0;">
                 <div class="fn-header">
                     <span class="fn-name">Rotating Cube</span>
                     <span class="fn-sig">rotateY + rotateX + project3D + drawTriangles</span>
                 </div>
                 <div class="fn-body">
                     <p class="fn-desc">A cube defined by 8 vertices, rotated on two axes every frame and drawn as 12
-                        triangles (2 per face). Each face has its own color.</p>
+                        triangles.</p>
                     <pre><span class="kw">const</span> vertices = [
   [<span class="num">-100</span>, <span class="num">-100</span>, <span class="num">-100</span>], [<span class="num">100</span>, <span class="num">-100</span>, <span class="num">-100</span>], [<span class="num">100</span>, <span class="num">100</span>, <span class="num">-100</span>], [<span class="num">-100</span>, <span class="num">100</span>, <span class="num">-100</span>],
   [<span class="num">-100</span>, <span class="num">-100</span>,  <span class="num">100</span>], [<span class="num">100</span>, <span class="num">-100</span>,  <span class="num">100</span>], [<span class="num">100</span>,  <span class="num">100</span>,  <span class="num">100</span>], [<span class="num">-100</span>,  <span class="num">100</span>,  <span class="num">100</span>]
@@ -964,15 +984,17 @@ console.<span class="fn">error</span>(<span class="str">'something broke'</span>
 });</pre>
                 </div>
             </div>
+            <div class="fn-card-preview"><div id="canvas-cube"></div></div>
+            </div><!-- end cube row -->
 
-            <div class="fn-card">
+            <div style="display:flex; flex-direction:row; gap:24px; align-items:flex-start; margin-bottom:20px;">
+            <div class="fn-card" style="flex:1; min-width:0; margin-bottom:0;">
                 <div class="fn-header">
                     <span class="fn-name">Rotating Pyramid</span>
                     <span class="fn-sig">rotateY + rotateX + project3D + drawTriangles</span>
                 </div>
                 <div class="fn-body">
-                    <p class="fn-desc">A pyramid with a square base and single apex. Position-shifted to upper-right via
-                        manual X/Y offset on the projected coordinates. Each face a different color.</p>
+                    <p class="fn-desc">A pyramid defined by 4 vertices, with a square base and single apex.</p>
                     <pre><span class="kw">const</span> pyramidVertices = [
   [<span class="num">-80</span>,  <span class="num">80</span>, <span class="num">-80</span>],  <span class="cm">// 0: bottom-left</span>
   [ <span class="num">80</span>,  <span class="num">80</span>, <span class="num">-80</span>],  <span class="cm">// 1: bottom-right</span>
@@ -1010,10 +1032,14 @@ console.<span class="fn">error</span>(<span class="str">'something broke'</span>
 });</pre>
                 </div>
             </div>
+            <div class="fn-card-preview"><div id="canvas-pyramid"></div></div>
+            </div><!-- end pyramid row -->
 
         </section>
 
     </main>
+
+    <div id="preview-sidebar"></div>
 
     <script src="https://cdnjs.cloudflare.com/ajax/libs/pixi.js/8.4.1/pixi.min.js"></script>
     <script>
@@ -1066,14 +1092,14 @@ console.<span class="fn">error</span>(<span class="str">'something broke'</span>
     // CUBE
     (async()=>{
         const app=new PIXI.Application();
-        await app.init({width:260,height:200,background:0x0a0a12,antialias:true});
+        await app.init({width:260,height:350,background:0x0a0a12,antialias:true});
         document.getElementById('canvas-cube').appendChild(app.canvas);
         const gfx=new PIXI.Graphics(); app.stage.addChild(gfx);
         const verts=[[-60,-60,-60],[60,-60,-60],[60,60,-60],[-60,60,-60],[-60,-60,60],[60,-60,60],[60,60,60],[-60,60,60]];
         let angle=0;
         app.ticker.add(()=>{
             gfx.clear();
-            const p=verts.map(v=>{let r=rotateY(v[0],v[1],v[2],angle);r=rotateX(r.x,r.y,r.z,angle*0.5);return project3D(r.x,r.y,r.z,130,100);});
+            const p=verts.map(v=>{let r=rotateY(v[0],v[1],v[2],angle);r=rotateX(r.x,r.y,r.z,angle*0.5);return project3D(r.x,r.y,r.z,130,160);});
             const tri=(a,b,c,col)=>gfx.poly([p[a].x,p[a].y,p[b].x,p[b].y,p[c].x,p[c].y]).fill(col);
             tri(4,5,6,0xFF0000);tri(4,6,7,0xFF0000);
             tri(0,1,2,0x880000);tri(0,2,3,0x880000);
@@ -1088,14 +1114,14 @@ console.<span class="fn">error</span>(<span class="str">'something broke'</span>
     // PYRAMID
     (async()=>{
         const app=new PIXI.Application();
-        await app.init({width:260,height:200,background:0x0a0a12,antialias:true});
+        await app.init({width:260,height:350,background:0x0a0a12,antialias:true});
         document.getElementById('canvas-pyramid').appendChild(app.canvas);
         const gfx=new PIXI.Graphics(); app.stage.addChild(gfx);
         const verts=[[-70,70,-70],[70,70,-70],[70,70,70],[-70,70,70],[0,-90,0]];
         let angle=0;
         app.ticker.add(()=>{
             gfx.clear();
-            const p=verts.map(v=>{let r=rotateY(v[0],v[1],v[2],angle);r=rotateX(r.x,r.y,r.z,angle*0.3);return project3D(r.x,r.y,r.z,130,110);});
+            const p=verts.map(v=>{let r=rotateY(v[0],v[1],v[2],angle);r=rotateX(r.x,r.y,r.z,angle*0.3);return project3D(r.x,r.y,r.z,130,160);});
             const tri=(a,b,c,col)=>gfx.poly([p[a].x,p[a].y,p[b].x,p[b].y,p[c].x,p[c].y]).fill(col);
             tri(0,1,2,0x4488FF);tri(0,2,3,0x4488FF);
             tri(0,1,4,0x00FFFF);tri(1,2,4,0x00FF88);
